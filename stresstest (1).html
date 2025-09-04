@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Renderöinti + Hardcore Stress Test + WebGL</title>
+  <style>
+    :root{--bg:#0b0f14;--panel:#121821;--text:#d8e1f0;--muted:#90a0b7;--acc:#5bd0ff;--warn:#ff7a7a}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Arial}
+    .wrap{display:grid;grid-template-rows:auto 1fr;height:100%}
+    header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,var(--panel),rgba(18,24,33,.8));backdrop-filter:blur(6px);border-bottom:1px solid rgba(255,255,255,.06)}
+    .bar{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;padding:.75rem 1rem;max-width:1400px;margin:0 auto}
+    .group{display:flex;align-items:center;gap:.5rem;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.04);padding:.45rem .6rem;border-radius:12px}
+    select,input,button{background:#0f141c;color:var(--text);border:1px solid rgba(255,255,255,.08);padding:.4rem .6rem;border-radius:10px}
+    button{cursor:pointer}
+    button.primary{background:var(--acc);color:#001018;border:none}
+    button.danger{background:var(--warn);color:#190000;border:none}
+    .stat{min-width:90px;text-align:center;background:#0f141c;border:1px solid rgba(255,255,255,.08);padding:.45rem .6rem;border-radius:12px}
+    main{position:relative;overflow:hidden}
+    canvas.stage, #domStage{position:absolute;inset:0}
+    #domStage .dot{position:absolute;will-change:transform;width:8px;height:8px;border-radius:50%}
+    .watermark{position:absolute;right:12px;bottom:10px;color:#99a8bf;font-size:.8rem;opacity:.7;pointer-events:none}
+    .logs{position:absolute;top:60px;left:20px;width:360px;height:240px;overflow:auto;background:#071018;color:#9fd8ff;font-family:monospace;font-size:.78rem;padding:8px;border-radius:8px;display:none;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="bar">
+        <div class="group">
+          <label for="mode">Tila</label>
+          <select id="mode">
+            <option value="canvas">Canvas 2D</option>
+            <option value="dom">DOM-elementit</option>
+            <option value="webgl">WebGL</option>
+            <option value="hardcore">Hardcore Freeze</option>
+          </select>
+        </div>
+        <div class="group" id="glGroup">
+          <label for="glMode">WebGL-moodi</label>
+          <select id="glMode">
+            <option value="points">Points (GPU)</option>
+            <option value="tris">Triangles (täyttö GPU)</option>
+            <option value="textured">Textured quads</option>
+          </select>
+        </div>
+
+        <div class="group">
+          <label for="count">Objektit</label>
+          <input id="count" type="range" min="100" max="500000" step="100" value="5000">
+          <span id="countLbl">5 000</span>
+        </div>
+
+        <div class="group">
+          <label for="size">Koko</label>
+          <input id="size" type="range" min="1" max="32" step="1" value="4">
+          <span id="sizeLbl">4</span>
+        </div>
+
+        <div class="group">
+          <label for="speed">Nopeus</label>
+          <input id="speed" type="range" min="0" max="5" step="0.1" value="1.6">
+          <span id="speedLbl">1.6</span>
+        </div>
+
+        <div class="group"><label><input id="trail" type="checkbox" checked> Jälkiviiva</label></div>
+
+        <div class="group">
+          <button class="primary" id="apply">Aja asetukset</button>
+          <button id="pause">Pysäytä</button>
+          <button class="danger" id="clear">Tyhjennä</button>
+        </div>
+
+        <div class="group">
+          <div class="stat"><small>FPS</small><b id="fps">–</b></div>
+          <div class="stat"><small>1% low</small><b id="p1">–</b></div>
+          <div class="stat"><small>ms/frame</small><b id="ms">–</b></div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <canvas id="canvas" class="stage"></canvas>
+      <div id="domStage" class="stage"></div>
+      <div class="logs" id="logs"></div>
+      <div class="watermark">🚧 Stressi: Canvas / DOM / WebGL / Hardcore — varoittaa: voi jäädyttää</div>
+    </main>
+  </div>
+
+  <div id="toast" style="display:none;position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:#0f141c;padding:.6rem .8rem;border-radius:12px;border:1px solid rgba(255,255,255,.08)"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const modeEl = $('#mode');
+const glGroup = $('#glGroup');
+const glModeEl = $('#glMode');
+const canvas = $('#canvas');
+const domStage = $('#domStage');
+const countEl = $('#count');
+const sizeEl = $('#size');
+const speedEl = $('#speed');
+const trailEl = $('#trail');
+const applyBtn = $('#apply');
+const pauseBtn = $('#pause');
+const clearBtn = $('#clear');
+const fpsEl = $('#fps');
+const p1El = $('#p1');
+const msEl = $('#ms');
+const countLbl = $('#countLbl');
+const sizeLbl = $('#sizeLbl');
+const speedLbl = $('#speedLbl');
+const logsEl = $('#logs');
+const toast = $('#toast');
+
+let W=0,H=0;let running=true;let particles=[];let frameTimes=[];let lastT=performance.now();
+function resize(){W=canvas.width=innerWidth;H=canvas.height=innerHeight-document.querySelector('header').offsetHeight;domStage.style.width=W+'px';domStage.style.height=H+'px'}
+addEventListener('resize',resize);resize();
+const rand=(a,b)=>a+Math.random()*(b-a);
+function mkColor(i){const h=(i*137.508)%360;return `hsl(${h}deg 85% 60%)`}
+
+function setupParticles(n){particles=new Array(n);for(let i=0;i<n;i++){particles[i]={x:rand(0,W),y:rand(0,H),vx:rand(-1,1),vy:rand(-1,1),c:mkColor(i)}}}
+function ensureDomChildren(n){const cur=domStage.children.length;if(cur<n){const frag=document.createDocumentFragment();for(let i=cur;i<n;i++){const d=document.createElement('div');d.className='dot';d.style.background=mkColor(i);frag.appendChild(d);}domStage.appendChild(frag);}else if(cur>n){for(let i=cur-1;i>=n;i--)domStage.removeChild(domStage.lastChild);}}
+
+const ctx = canvas.getContext('2d',{alpha:true,desynchronized:true});
+function stepCanvas(){const speed=parseFloat(speedEl.value);const size=parseInt(sizeEl.value,10);for(let p of particles){p.x+=p.vx*(20*speed);p.y+=p.vy*(20*speed);if(p.x<-50||p.x>W+50)p.vx*=-1;if(p.y<-50||p.y>H+50)p.vy*=-1;}if(!trailEl.checked){ctx.clearRect(0,0,W,H);}else{ctx.fillStyle='rgba(0,0,0,0.08)';ctx.fillRect(0,0,W,H);}ctx.save();for(let i=0;i<particles.length;i++){const p=particles[i];ctx.fillStyle=p.c;const sizev=parseInt(sizeEl.value,10);ctx.beginPath();ctx.arc(p.x,p.y,sizev,0,Math.PI*2);ctx.fill();}ctx.restore();}
+
+function stepDOM(){const size=parseInt(sizeEl.value,10);const children=domStage.children;for(let i=0;i<particles.length;i++){const p=particles[i];p.x+=p.vx*(20*parseFloat(speedEl.value));p.y+=p.vy*(20*parseFloat(speedEl.value));if(p.x<-50||p.x>W+50)p.vx*=-1;if(p.y<-50||p.y>H+50)p.vy*=-1;const d=children[i];const s=size*2;d.style.width=s+'px';d.style.height=s+'px';d.style.borderRadius='50%';d.style.transform=`translate3d(${p.x-size}px, ${p.y-size}px, 0)`;d.style.background=p.c;}}
+
+// --- Hardcore
+function log(msg){console.log(msg);logsEl.style.display='block';logsEl.textContent += `\n${msg}`;logsEl.scrollTop=logsEl.scrollHeight;}
+function domFlood(n){for(let i=0;i<n;i++){const d=document.createElement('div');d.textContent='x';d.style.position='absolute';d.style.left=(i%100)+'px';d.style.top=Math.floor(i/100)+'px';d.style.width='1px';d.style.height='1px';d.style.background='rgb('+(i%256)+',0,0)';document.body.appendChild(d);}}
+function innerDump(n){let s='';for(let i=0;i<n;i++) s+='<div style="width:1px;height:1px;display:inline-block">x</div>';document.body.innerHTML+=s;}
+function allocHuge(mb){const blobs=[];const chunk=1024*1024;for(let i=0;i<mb;i++){const a=new Uint8Array(chunk);for(let j=0;j<chunk;j+=4096) a[j]=1;blobs.push(a);}window._blobs=blobs}
+function busyLoop(ms){const end=performance.now()+ms;while(performance.now()<end){Math.sqrt(Math.random()*Math.random()*Date.now());}}
+function chaos(n){log('CHAOS start');domFlood(n);busyLoop(3000);innerDump(Math.min(20000,Math.floor(n/10)));allocHuge(200);log('CHAOS end')}
+
+// --- glue
+function applySettings(){
+  const n=parseInt(countEl.value,10);
+  const mode=modeEl.value;
+  logsEl.style.display='none';
+  if(mode==='canvas'){
+    glGroup.style.display='none';
+    canvas.style.display='block';domStage.style.display='none';ensureDomChildren(0);setupParticles(n);
+  } else if(mode==='dom'){
+    glGroup.style.display='none';
+    canvas.style.display='none';domStage.style.display='block';ensureDomChildren(n);setupParticles(n);
+  } else if(mode==='webgl'){
+    glGroup.style.display='flex';
+    canvas.style.display='block';domStage.style.display='none';setupParticles(n);
+    log('WebGL start');
+  } else if(mode==='hardcore'){
+    glGroup.style.display='none';
+    canvas.style.display='none';domStage.style.display='none';setupParticles(0);
+    setTimeout(()=>chaos(n),200);
+  }
+}
+
+function update(dt){const mode=modeEl.value; if(mode==='canvas'){stepCanvas(); } else if(mode==='dom'){stepDOM(); } }
+
+function loop(t){ if(!running){ requestAnimationFrame(loop); return; } const dt=t-lastT; lastT=t; update(dt); frameTimes.push(dt); if(frameTimes.length>240) frameTimes.shift(); const avg=frameTimes.reduce((a,b)=>a+b,0)/frameTimes.length; const fps=1000/avg; const p1=percentile(frameTimes,0.99); fpsEl.textContent=fps.toFixed(1); p1El.textContent=(1000/p1).toFixed(1); msEl.textContent=avg.toFixed(1); requestAnimationFrame(loop);} function percentile(arr,pct){ if(arr.length===0) return 0; const a=[...arr].sort((x,y)=>x-y); const idx=Math.min(a.length-1, Math.max(0, Math.floor(pct*a.length)-1)); return a[idx]; }
+
+countEl.addEventListener('input', ()=> countLbl.textContent = countEl.value.replace(/\B(?=(\d{3})+(?!\d))/g,' '));
+sizeEl.addEventListener('input', ()=> sizeLbl.textContent = sizeEl.value);
+speedEl.addEventListener('input', ()=> speedLbl.textContent = speedEl.value);
+applyBtn.addEventListener('click', applySettings);
+pauseBtn.addEventListener('click', ()=>{ running = !running; pauseBtn.textContent = running ? 'Pysäytä' : 'Jatka'; });
+clearBtn.addEventListener('click', ()=>{ particles=[]; ctx && ctx.clearRect(0,0,W,H); ensureDomChildren(0); toast.textContent='Tyhjennetty'; toast.style.display='block'; setTimeout(()=>toast.style.display='none',2000); });
+modeEl.addEventListener('change', applySettings);
+
+applySettings(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
